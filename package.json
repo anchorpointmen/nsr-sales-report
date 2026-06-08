@@ -1,7 +1,7 @@
 {
   "name": "nsr-sales-report",
   "version": "1.0.0",
-  "description": "Weekly NSR ELITE sales KPI report + Steven Slack bot — pulls AccuLynx sales + Active Knocker activity, posts to Slack and answers questions.",
+  "description": "Weekly NSR ELITE sales KPI report + Steven Slack bot",
   "type": "module",
   "main": "src/index.js",
   "scripts": {
