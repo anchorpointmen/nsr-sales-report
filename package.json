@@ -1,16 +1,22 @@
 {
   "name": "nsr-sales-report",
   "version": "1.0.0",
-  "description": "Weekly NSR ELITE sales KPI report — pulls AccuLynx sales + Active Knocker door-knock activity and posts to Slack.",
+  "description": "Weekly NSR ELITE sales KPI report + Steven Slack bot — pulls AccuLynx sales + Active Knocker activity, posts to Slack and answers questions.",
   "type": "module",
   "main": "src/index.js",
   "scripts": {
     "report": "node src/index.js",
     "report:dry": "DRY_RUN=true node src/index.js",
-    "probe:knocker": "node scripts/probe-activeknocker.js"
+    "probe:knocker": "node scripts/probe-activeknocker.js",
+    "start": "node bot/app.js",
+    "bot": "node bot/app.js"
   },
   "engines": {
     "node": ">=20"
+  },
+  "dependencies": {
+    "@slack/bolt": "^4.7.3",
+    "@anthropic-ai/sdk": "^0.102.0"
   },
   "license": "UNLICENSED",
   "private": true
