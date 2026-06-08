@@ -1,13 +1,17 @@
-// app.js — NSR sales bot "Steven". Socket Mode, listens for DMs, answers with
-// Claude using a live KPI snapshot as context. Standalone; deploy on Railway.
+// app.js — "Steven", NSR's sales agent. Socket Mode Slack bot.
+// Answers any sales question by calling AccuLynx tools live (Claude picks the tool).
+// Hard anti-flood caps: one question at a time per channel, bounded tool loop,
+// exactly one reply per message, cooldown between replies.
 
 import pkg from "@slack/bolt";
 const { App } = pkg;
 import Anthropic from "@anthropic-ai/sdk";
-import { getSnapshot } from "./data.js";
+import { TOOL_DEFS, runTool } from "./acculynx-tools.js";
 
 const anthropic = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
 const MODEL = "claude-sonnet-4-6";
+const MAX_TOOL_TURNS = 6;
+const COOLDOWN_MS = 3000;
 
 const app = new App({
   token: process.env.SLACK_BOT_TOKEN,
@@ -15,84 +19,102 @@ const app = new App({
   socketMode: true,
 });
 
-const history = new Map();
+const channels = new Map();
+function chan(id) {
+  if (!channels.has(id)) channels.set(id, { history: [], busy: false, lastReply: 0 });
+  return channels.get(id);
+}
 const MAX_TURNS = 8;
 
-function systemPrompt(snapshot) {
+function systemPrompt() {
+  const today = new Date().toISOString().slice(0, 10);
   return [
-    "You are Steven, the NSR sales assistant for New Standard Restoration, a roofing/exterior restoration company.",
-    "You answer the owner's questions about sales KPIs concisely and directly, like a sharp sales manager.",
-    "Use ONLY the data in the snapshot below. If something isn't in it, say so plainly — don't invent numbers.",
-    "Revenue is in USD. 'Doors' and 'appointments' come from Active Knocker; if doorKnockReady is false, note that door data isn't live yet.",
-    "Company culture is 'Discipline Over Motivation' — keep answers grounded and actionable. Format for Slack (short, scannable).",
-    "",
-    "LIVE KPI SNAPSHOT (JSON):",
-    JSON.stringify(snapshot),
+    "You are Steven, the sales agent for New Standard Restoration (NSR), a roofing/exterior restoration company.",
+    `Today's date is ${today}. NSR's timezone is America/Chicago.`,
+    "You answer sales questions by calling the provided AccuLynx tools to get LIVE data. Never invent numbers — if a tool returns nothing, say so.",
+    "A SALE is dated by when a job entered the 'Approved' milestone. Use sales_by_approved_date for any sales question.",
+    "For 'leads', 'prospects', or pipeline-position questions, use jobs_by_milestone or pipeline_snapshot.",
+    "Compute date ranges yourself from the question (e.g. 'this week' = the current Sat–Fri; 'this month' = 1st to today; 'this year' = Jan 1 to today) and pass them to the tools.",
+    "Revenue is USD. Keep answers short and scannable for Slack — lead with the number, then a brief per-rep breakdown if relevant.",
+    "Company motto: Discipline Over Motivation.",
   ].join("\n");
 }
 
-async function answer(channel, userText) {
-  const snapshot = await getSnapshot();
-  const turns = history.get(channel) ?? [];
-  turns.push({ role: "user", content: userText });
+async function runAgent(history) {
+  const messages = [...history];
+  for (let turn = 0; turn < MAX_TOOL_TURNS; turn++) {
+    const res = await anthropic.messages.create({
+      model: MODEL,
+      max_tokens: 1024,
+      system: systemPrompt(),
+      tools: TOOL_DEFS,
+      messages,
+    });
 
-  const res = await anthropic.messages.create({
-    model: MODEL,
-    max_tokens: 1024,
-    system: systemPrompt(snapshot),
-    messages: turns.slice(-MAX_TURNS),
-  });
+    const toolUses = res.content.filter((b) => b.type === "tool_use");
+    if (toolUses.length === 0) {
+      const text = res.content.filter((b) => b.type === "text").map((b) => b.text).join("\n").trim();
+      messages.push({ role: "assistant", content: res.content });
+      return { text: text || "I didn't find anything for that.", messages };
+    }
 
-  const reply = res.content.filter((b) => b.type === "text").map((b) => b.text).join("\n").trim()
-    || "I couldn't generate a response.";
-  turns.push({ role: "assistant", content: reply });
-  history.set(channel, turns.slice(-MAX_TURNS));
-  return reply;
+    messages.push({ role: "assistant", content: res.content });
+    const toolResults = [];
+    for (const tu of toolUses) {
+      try {
+        const result = await runTool(tu.name, tu.input || {});
+        toolResults.push({ type: "tool_result", tool_use_id: tu.id, content: JSON.stringify(result).slice(0, 8000) });
+      } catch (err) {
+        toolResults.push({ type: "tool_result", tool_use_id: tu.id, content: `Error: ${err.message}`, is_error: true });
+      }
+    }
+    messages.push({ role: "user", content: toolResults });
+  }
+  return { text: "That took too many steps to compute — try narrowing the question (e.g. a specific date range).", messages };
 }
 
-// Reset command.
-app.message(/^(reset|clear)$/i, async ({ message, say }) => {
+app.message(async ({ message, say }) => {
+  if (message.subtype === "bot_message" || message.bot_id || message.subtype) return;
   if (message.channel_type !== "im") return;
-  history.delete(message.channel);
-  await say("Cleared our conversation. Ask away.");
-});
 
-// Discovery command — pulls real AccuLynx milestones + sub-statuses.
-app.message(/^list milestones$/i, async ({ message, say }) => {
-  if (message.channel_type !== "im") return;
-  try {
-    const { listMilestones } = await import("../src/acculynx.js");
-    const ms = await listMilestones();
-    if (!ms.length) {
-      await say("AccuLynx returned no milestones. (Check the API key/permissions.)");
-      return;
-    }
-    const lines = ms.map((m) => {
-      const subs = m.statuses.length ? `\n   • ${m.statuses.join("\n   • ")}` : "";
-      return `*${m.name}*${subs}`;
-    });
-    await say("*AccuLynx milestones & sub-statuses:*\n\n" + lines.join("\n\n"));
-  } catch (err) {
-    await say(`Couldn't fetch milestones: ${err.message}`);
+  const text = (message.text || "").trim();
+  if (!text) return;
+
+  const c = chan(message.channel);
+
+  if (/^(reset|clear)$/i.test(text)) {
+    c.history = [];
+    await say("Cleared. Ask me anything about sales.");
+    return;
   }
-});
 
-// Catch-all — answer any other DM as a question. MUST be last.
-app.message(async ({ message, say, client }) => {
-  if (message.subtype === "bot_message" || message.bot_id) return;
-  if (message.channel_type !== "im") return;
+  if (c.busy) {
+    if (Date.now() - c.lastReply > COOLDOWN_MS) {
+      c.lastReply = Date.now();
+      await say("Still working on your last question — one sec.");
+    }
+    return;
+  }
 
+  c.busy = true;
   try {
-    await client.assistant?.threads?.setStatus?.({ channel_id: message.channel, thread_ts: message.ts, status: "thinking…" }).catch(() => {});
-    const reply = await answer(message.channel, message.text || "");
-    await say(reply);
+    c.history.push({ role: "user", content: text });
+    c.history = c.history.slice(-MAX_TURNS);
+
+    const { text: reply, messages } = await runAgent(c.history);
+    c.history = messages.slice(-MAX_TURNS);
+
+    await say(reply.slice(0, 3500));
+    c.lastReply = Date.now();
   } catch (err) {
-    console.error("Answer failed:", err);
-    await say(`Something went wrong pulling the numbers: ${err.message}`);
+    console.error("Agent error:", err);
+    await say(`Couldn't complete that: ${err.message}`);
+  } finally {
+    c.busy = false;
   }
 });
 
 (async () => {
   await app.start();
-  console.log("⚡ NSR sales bot running (Socket Mode).");
+  console.log("⚡ Steven (sales agent) running — Socket Mode.");
 })();
