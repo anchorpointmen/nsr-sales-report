@@ -33,6 +33,15 @@ async function get(path, params = {}) {
   }
   return res.json();
 }
+// Discovery helper: lists all milestones with their sub-statuses.
+export async function listMilestones() {
+  const data = await get("/milestones", { includes: "status" });
+  const items = data.items ?? data.results ?? data.data ?? data ?? [];
+  return items.map((m) => ({
+    name: m.name ?? m.milestoneName ?? m.title ?? "(unnamed)",
+    statuses: (m.statuses ?? m.status ?? []).map((s) => s.name ?? s.statusName ?? s.title ?? "(unnamed)"),
+  }));
+}
 
 // Pull every sold job in [startDate, endDate], following pagination.
 async function fetchSoldJobs({ startDate, endDate, milestones }) {
