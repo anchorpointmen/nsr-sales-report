@@ -1,0 +1,17 @@
+{
+  "name": "nsr-sales-bot",
+  "version": "1.0.0",
+  "description": "Slack DM bot — answers questions about NSR sales KPIs using live AccuLynx + Active Knocker data, backed by Claude.",
+  "type": "module",
+  "main": "bot/app.js",
+  "scripts": {
+    "start": "node bot/app.js"
+  },
+  "engines": { "node": ">=20" },
+  "dependencies": {
+    "@slack/bolt": "^4.7.3",
+    "@anthropic-ai/sdk": "^0.102.0"
+  },
+  "license": "UNLICENSED",
+  "private": true
+}

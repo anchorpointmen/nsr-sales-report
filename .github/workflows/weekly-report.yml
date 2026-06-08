@@ -1,0 +1,34 @@
+name: Weekly Sales Report
+
+on:
+  schedule:
+    # Friday 8:00 PM Central. GitHub cron is UTC-only and can't follow DST,
+    # so we list both offsets and let the script confirm it's actually 8 PM CT:
+    #   CDT (summer, UTC-5): Fri 8 PM = Sat 01:00 UTC
+    #   CST (winter, UTC-6): Fri 8 PM = Sat 02:00 UTC
+    - cron: "0 1 * * 6"
+    - cron: "0 2 * * 6"
+  workflow_dispatch: {}   # allows manual "Run workflow" from the Actions tab
+
+jobs:
+  report:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+
+      - name: Run weekly report
+        env:
+          GITHUB_EVENT_NAME: ${{ github.event_name }}
+          ACCULYNX_API_KEY: ${{ secrets.ACCULYNX_API_KEY }}
+          ACTIVEKNOCKER_API_KEY: ${{ secrets.ACTIVEKNOCKER_API_KEY }}
+          ACTIVEKNOCKER_BASE_URL: ${{ secrets.ACTIVEKNOCKER_BASE_URL }}
+          ACTIVEKNOCKER_ACTIVITY_PATH: ${{ secrets.ACTIVEKNOCKER_ACTIVITY_PATH }}
+          ACTIVEKNOCKER_READY: ${{ secrets.ACTIVEKNOCKER_READY }}
+          SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
+        run: node src/index.js
