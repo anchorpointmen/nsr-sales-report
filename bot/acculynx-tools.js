@@ -1,4 +1,11 @@
 // acculynx-tools.js — the live-query toolbox Steven uses to answer sales questions.
+// Each tool maps to AccuLynx API calls. The agent (Claude) decides which to call.
+//
+// API: REST v2, base https://api.acculynx.com/api/v2, Bearer auth.
+// A SALE is dated by when a job entered the Approved milestone (milestone history).
+// Sales owner is a SEPARATE endpoint returning a user id -> resolved via /users.
+// Revenue comes from /jobs/{id}/financials -> approvedJobValue.
+
 const BASE = "https://api.acculynx.com/api/v2";
 
 function authHeaders() {
@@ -47,26 +54,67 @@ async function fetchJobs({ milestones, dateFilterType, startDate, endDate, sortB
   return all;
 }
 
-function salesOwner(job) {
-  return job.salesOwner?.name || job.salesOwner?.fullName ||
-    [job.salesOwner?.firstName, job.salesOwner?.lastName].filter(Boolean).join(" ") ||
-    job.salesRep || "Unassigned";
+// Cache the user-id -> name map (fetched once per process refresh).
+let _userMap = null;
+async function getUserMap() {
+  if (_userMap) return _userMap;
+  const map = {};
+  let pageStartIndex = 0;
+  for (let p = 0; p < 20; p++) {
+    const data = await get("/users", { pageSize: 50, pageStartIndex });
+    const items = data.items ?? data.results ?? data.data ?? [];
+    for (const u of items) {
+      const name = u.fullName || [u.firstName, u.lastName].filter(Boolean).join(" ") || u.name || u.displayName;
+      if (u.id && name) map[u.id] = name;
+    }
+    if (items.length < 50) break;
+    pageStartIndex += 50;
+  }
+  _userMap = map;
+  return map;
 }
 
-async function jobRevenue(job) {
-  const direct = job.approvedValue ?? job.contractValue ?? job.totalValue;
-  if (typeof direct === "number") return direct;
-  try { const fin = await get(`/jobs/${job.id}/financials`); const f = Array.isArray(fin) ? fin[0] : (fin.items?.[0] ?? fin); return f?.approvedValue ?? f?.worksheet?.totalPrice ?? 0; } catch { return 0; }
+// Resolve a job's sales owner NAME via the representatives endpoint + user map.
+async function resolveSalesOwner(jobId) {
+  try {
+    const rep = await get(`/jobs/${jobId}/representatives/sales-owner`);
+    const userId = rep?.user?.id;
+    if (!userId) return "Unassigned";
+    const map = await getUserMap();
+    return map[userId] || "Unassigned";
+  } catch {
+    return "Unassigned";
+  }
+}
+
+// Revenue comes from the financials endpoint; the field is approvedJobValue.
+async function jobRevenue(jobId) {
+  try {
+    const fin = await get(`/jobs/${jobId}/financials`);
+    return fin?.approvedJobValue ?? fin?.worksheetSectionTotals?.worksheetTotal ?? 0;
+  } catch {
+    return 0;
+  }
 }
 
 async function approvedDate(jobId) {
-  try { const hist = await get(`/jobs/${jobId}/milestone-history`); const items = hist.items ?? hist.results ?? hist.data ?? []; const a = items.find((m) => (m.name ?? "").toLowerCase() === "approved"); return a?.date ? a.date.slice(0, 10) : null; } catch { return null; }
+  try {
+    const hist = await get(`/jobs/${jobId}/milestone-history`);
+    const items = hist.items ?? hist.results ?? hist.data ?? [];
+    const a = items.find((m) => (m.name ?? "").toLowerCase() === "approved");
+    return a?.date ? a.date.slice(0, 10) : null;
+  } catch { return null; }
 }
+
+// ============================ THE TOOLS ============================
 
 export async function jobsByMilestone({ milestones, startDate, endDate, dateFilterType = "MilestoneDate" }) {
   const jobs = await fetchJobs({ milestones, startDate, endDate, dateFilterType });
   const byRep = {};
-  for (const j of jobs) { const owner = salesOwner(j); byRep[owner] = (byRep[owner] || 0) + 1; }
+  for (const j of jobs) {
+    const owner = await resolveSalesOwner(j.id);
+    byRep[owner] = (byRep[owner] || 0) + 1;
+  }
   return { count: jobs.length, byRep, milestone: milestones, dateRange: { startDate, endDate } };
 }
 
@@ -79,11 +127,12 @@ export async function salesByApprovedDate({ startDate, endDate }) {
     if (!date) continue;
     if (startDate && date < startDate) continue;
     if (endDate && date > endDate) continue;
-    const rev = await jobRevenue(j);
-    const owner = salesOwner(j);
+    const [rev, owner] = await Promise.all([jobRevenue(j.id), resolveSalesOwner(j.id)]);
     byRep[owner] = byRep[owner] || { jobs: 0, revenue: 0 };
-    byRep[owner].jobs += 1; byRep[owner].revenue += rev || 0;
-    totalRevenue += rev || 0; totalJobs += 1;
+    byRep[owner].jobs += 1;
+    byRep[owner].revenue += rev || 0;
+    totalRevenue += rev || 0;
+    totalJobs += 1;
   }
   return { totalJobs, totalRevenue, byRep, dateRange: { startDate, endDate } };
 }
