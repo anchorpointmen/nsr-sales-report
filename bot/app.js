@@ -31,6 +31,19 @@ function systemPrompt(snapshot) {
     JSON.stringify(snapshot),
   ].join("\n");
 }
+app.message(/^list milestones$/i, async ({ message, say }) => {
+  if (message.channel_type !== "im") return;
+  try {
+    const { listMilestones } = await import("../src/acculynx.js");
+    const ms = await listMilestones();
+    if (!ms.length) { await say("AccuLynx returned no milestones."); return; }
+    const lines = ms.map((m) => {
+      const subs = m.statuses.length ? `\n   • ${m.statuses.join("\n   • ")}` : "";
+      return `*${m.name}*${subs}`;
+    });
+    await say("*AccuLynx milestones & sub-statuses:*\n\n" + lines.join("\n\n"));
+  } catch (err) { await say(`Couldn't fetch milestones: ${err.message}`); }
+});
 
 async function answer(channel, userText) {
   const snapshot = await getSnapshot();
